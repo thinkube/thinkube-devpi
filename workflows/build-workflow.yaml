@@ -1,0 +1,168 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: build-devpi-
+  namespace: argo
+spec:
+  entrypoint: build-and-update-git
+  serviceAccountName: kaniko-builder
+  artifactRepositoryRef:
+    configMap: artifact-repositories
+    key: default-v1
+  volumes:
+  - name: docker-config
+    secret:
+      secretName: docker-config
+  - name: workspace
+    emptyDir: {}
+  - name: ssh-key
+    secret:
+      secretName: github-ssh-key-pem
+      defaultMode: 0600
+  templates:
+  - name: build-and-update-git
+    dag:
+      tasks:
+      - name: debug-ssh
+        template: debug-ssh
+      - name: clone-repo
+        template: clone-repo
+        dependencies:
+        - debug-ssh
+      - name: build-image
+        template: build-image
+        dependencies:
+        - clone-repo
+        arguments:
+          artifacts:
+          - name: repo
+            from: "{{tasks.clone-repo.outputs.artifacts.repo}}"
+      - name: update-git
+        template: update-git
+        dependencies: 
+        - build-image
+        arguments:
+          artifacts:
+          - name: repo
+            from: "{{tasks.clone-repo.outputs.artifacts.repo}}"
+  
+  - name: debug-ssh
+    container:
+      image: alpine:latest
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          echo "Installing necessary tools..."
+          apk add --no-cache openssh-client git
+          echo "======== DEBUG SSH KEY INFO ========"
+          ls -la /mnt/ssh
+          head -3 /mnt/ssh/ssh-privatekey
+          stat /mnt/ssh/ssh-privatekey
+          file /mnt/ssh/ssh-privatekey || echo "Command 'file' not found"
+          ssh-keygen -l -f /mnt/ssh/ssh-privatekey || echo "Failed to analyze key with ssh-keygen"
+          echo "Testing SSH connection to GitHub:"
+          GIT_SSH_COMMAND="ssh -v -i /mnt/ssh/ssh-privatekey -o StrictHostKeyChecking=no" git ls-remote git@github.com:thinkube/devpi-deployment.git || echo "Failed to connect to GitHub"
+          echo "======== END DEBUG INFO ========"
+      volumeMounts:
+        - name: ssh-key
+          mountPath: /mnt/ssh
+          readOnly: true
+          
+  - name: clone-repo
+    container:
+      image: alpine/git:latest
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          echo "Setting up SSH for Git clone..."
+          apk add --no-cache curl openssh-client jq
+          echo "Repository URL: git@github.com:thinkube/devpi-deployment.git"
+          ssh-keygen -l -f /mnt/ssh/ssh-privatekey || echo "Failed to show key fingerprint"
+          mkdir -p /workspace
+          GIT_SSH_COMMAND="ssh -vvv -i /mnt/ssh/ssh-privatekey -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" git clone git@github.com:thinkube/devpi-deployment.git /workspace || {
+            echo "===== CLONE FAILED ====="
+            ls -la /mnt/ssh/
+            GIT_SSH_COMMAND="ssh -vvv -o IdentitiesOnly=yes -i /mnt/ssh/ssh-privatekey -o StrictHostKeyChecking=no" git clone git@github.com:thinkube/devpi-deployment.git /workspace || {
+              echo "Clone attempt failed with IdentitiesOnly option too"
+              exit 1
+            }
+          }
+          ls -la /workspace
+          if [ -f /workspace/dockerfile/Dockerfile ]; then
+            echo "✓ Dockerfile found at /workspace/dockerfile/Dockerfile"
+          else
+            echo "✗ ERROR: Dockerfile not found at expected location"
+            find /workspace -name Dockerfile
+            exit 1
+          fi
+      env:
+        - name: GIT_SSH_COMMAND
+          value: "ssh -i /mnt/ssh/ssh-privatekey -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: ssh-key
+          mountPath: /mnt/ssh
+          readOnly: true
+    outputs:
+      artifacts:
+        - name: repo
+          path: /workspace
+          
+  - name: build-image
+    inputs:
+      artifacts:
+        - name: repo
+          path: /workspace
+    container:
+      image: gcr.io/kaniko-project/executor:latest
+      args:
+        - --dockerfile=dockerfile/Dockerfile
+        - --context=/workspace
+        - --destination=registry.cmxela.com/thinkube/devpi:20250304T142928
+        - --insecure
+        - --insecure-pull
+        - --skip-tls-verify
+        - --verbosity=debug
+      volumeMounts:
+        - name: docker-config
+          mountPath: /kaniko/.docker/
+        
+  - name: update-git
+    inputs:
+      artifacts:
+        - name: repo
+          path: /workspace
+    container:
+      image: alpine/git:latest
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          echo "Setting up Git configuration..."
+          git config --global user.email "ansible@example.com"
+          git config --global user.name "Ansible Automation"
+          cd /workspace
+          echo "Listing workspace contents:"
+          ls -la
+          echo "Listing k8s directory contents:"
+          ls -la k8s/ || echo "k8s directory not found"
+          sed -i "s|newTag:.*|newTag: 20250304T142928|" k8s/kustomization.yaml
+          git add k8s/kustomization.yaml
+          git commit -m "Update image tag to 20250304T142928"
+          echo "Setting up SSH for git push"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          head -3 /mnt/ssh/ssh-privatekey
+          ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
+          echo "Testing SSH connection to GitHub:"
+          GIT_SSH_COMMAND="ssh -v -i /mnt/ssh/ssh-privatekey -o StrictHostKeyChecking=no" git ls-remote git@github.com:thinkube/devpi-deployment.git || echo "Failed to connect to GitHub"
+          echo "Pushing changes to GitHub..."
+          GIT_SSH_COMMAND="ssh -v -i /mnt/ssh/ssh-privatekey -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" git push origin master
+      env:
+        - name: GIT_SSH_COMMAND
+          value: "ssh -i /mnt/ssh/ssh-privatekey -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+      volumeMounts:
+        - name: ssh-key
+          mountPath: /mnt/ssh
+          readOnly: true

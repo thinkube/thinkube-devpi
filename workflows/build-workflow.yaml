@@ -4,8 +4,23 @@ metadata:
   generateName: build-devpi-
   namespace: argo
 spec:
+  # This ensures all workflow pods run on the master node where SSH keys are properly set up
+  nodeSelector:
+    kubernetes.io/hostname: gato-p
+  
+  # Add workflow parameters
+  arguments:
+    parameters:
+    - name: repo-url
+      value: git@github.com:thinkube/devpi-deployment.git
+    - name: repo-name
+      value: devpi-deployment
+    - name: repo-org
+      value: thinkube
+  
   entrypoint: build-and-update-git
   serviceAccountName: kaniko-builder
+  # Use the same artifact repository configuration
   artifactRepositoryRef:
     configMap: artifact-repositories
     key: default-v1
@@ -17,7 +32,7 @@ spec:
     emptyDir: {}
   - name: ssh-key
     secret:
-      secretName: github-ssh-key-pem
+      secretName: github-ssh-key-devpi-deployment
       defaultMode: 0600
   templates:
   - name: build-and-update-git
@@ -25,15 +40,31 @@ spec:
       tasks:
       - name: debug-ssh
         template: debug-ssh
+        arguments:
+          parameters:
+          - name: repo-url
+            value: "{{workflow.parameters.repo-url}}"
       - name: clone-repo
         template: clone-repo
         dependencies:
         - debug-ssh
+        arguments:
+          parameters:
+          - name: repo-url
+            value: "{{workflow.parameters.repo-url}}"
+      - name: generate-timestamp
+        template: generate-timestamp
+        dependencies:
+        - clone-repo
       - name: build-image
         template: build-image
         dependencies:
         - clone-repo
+        - generate-timestamp
         arguments:
+          parameters:
+          - name: image-tag
+            value: "{{tasks.generate-timestamp.outputs.parameters.timestamp}}"
           artifacts:
           - name: repo
             from: "{{tasks.clone-repo.outputs.artifacts.repo}}"
@@ -42,26 +73,102 @@ spec:
         dependencies: 
         - build-image
         arguments:
+          parameters:
+          - name: repo-url
+            value: "{{workflow.parameters.repo-url}}"
+          - name: repo-org
+            value: "{{workflow.parameters.repo-org}}"
+          - name: repo-name
+            value: "{{workflow.parameters.repo-name}}"
+          - name: image-tag
+            value: "{{tasks.generate-timestamp.outputs.parameters.timestamp}}"
           artifacts:
           - name: repo
             from: "{{tasks.clone-repo.outputs.artifacts.repo}}"
   
+  - name: generate-timestamp
+    container:
+      image: alpine:latest
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          # Generate a timestamp in the format YYYYMMDDTHHmmss
+          echo -n $(date +%Y%m%dT%H%M%S) > /tmp/timestamp.txt
+          echo "Generated timestamp: $(cat /tmp/timestamp.txt)"
+    outputs:
+      parameters:
+      - name: timestamp
+        valueFrom:
+          path: /tmp/timestamp.txt
+  
   - name: debug-ssh
+    inputs:
+      parameters:
+      - name: repo-url
     container:
       image: alpine:latest
       command: ["/bin/sh", "-c"]
       args:
         - |
           echo "Installing necessary tools..."
-          apk add --no-cache openssh-client git
-          echo "======== DEBUG SSH KEY INFO ========"
+          apk add --no-cache openssh-client git curl
+          
+          echo "======== SSH KEY DEBUG INFO ========"
+          echo "Mounted SSH key directory contents:"
           ls -la /mnt/ssh
-          head -3 /mnt/ssh/ssh-privatekey
+          
+          echo "Key permissions:"
           stat /mnt/ssh/ssh-privatekey
-          file /mnt/ssh/ssh-privatekey || echo "Command 'file' not found"
-          ssh-keygen -l -f /mnt/ssh/ssh-privatekey || echo "Failed to analyze key with ssh-keygen"
-          echo "Testing SSH connection to GitHub:"
-          GIT_SSH_COMMAND="ssh -v -i /mnt/ssh/ssh-privatekey -o StrictHostKeyChecking=no" git ls-remote git@github.com:thinkube/devpi-deployment.git || echo "Failed to connect to GitHub"
+          
+          echo "First line of key file (checking format):"
+          head -n 1 /mnt/ssh/ssh-privatekey
+          
+          echo "Key file line count:"
+          cat /mnt/ssh/ssh-privatekey | wc -l
+          
+          echo "Checking if file is in correct format:"
+          if grep -q "BEGIN .* PRIVATE KEY" /mnt/ssh/ssh-privatekey; then
+            echo "✅ Key appears to be in correct PEM format"
+          else
+            echo "❌ Key does NOT appear to be in PEM format"
+            echo "Attempting to fix key format..."
+            mkdir -p ~/.ssh
+            chmod 700 ~/.ssh
+            cat /mnt/ssh/ssh-privatekey | tr -d '\r' > ~/.ssh/id_ed25519.fixed
+            chmod 600 ~/.ssh/id_ed25519.fixed
+            
+            echo "Fixed key first line:"
+            head -n 1 ~/.ssh/id_ed25519.fixed
+            
+            echo "Fixed key file line count:"
+            cat ~/.ssh/id_ed25519.fixed | wc -l
+            
+            echo "Key fingerprint after fixing:"
+            ssh-keygen -l -f ~/.ssh/id_ed25519.fixed || echo "Still failed to analyze key with ssh-keygen"
+            
+            echo "Testing SSH with fixed key:"
+            cp ~/.ssh/id_ed25519.fixed ~/.ssh/id_ed25519
+            chmod 600 ~/.ssh/id_ed25519
+            ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
+            ssh -v -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no git@github.com || echo "SSH test still failed"
+          fi
+          
+          echo "Adding known hosts and testing connection:"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
+          
+          echo "Testing connection with original key:"
+          cp /mnt/ssh/ssh-privatekey ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh -v -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no git@github.com || echo "SSH connection test failed"
+          
+          echo "Testing git ls-remote with repository:"
+          git ls-remote {{inputs.parameters.repo-url}} || echo "Git ls-remote failed"
+          
+          echo "Environment variables:"
+          env | grep -i ssh || echo "No SSH environment variables found"
+          
           echo "======== END DEBUG INFO ========"
       volumeMounts:
         - name: ssh-key
@@ -69,6 +176,9 @@ spec:
           readOnly: true
           
   - name: clone-repo
+    inputs:
+      parameters:
+      - name: repo-url
     container:
       image: alpine/git:latest
       command: ["/bin/sh", "-c"]
@@ -76,29 +186,55 @@ spec:
         - |
           set -e
           echo "Setting up SSH for Git clone..."
-          apk add --no-cache curl openssh-client jq
-          echo "Repository URL: git@github.com:thinkube/devpi-deployment.git"
-          ssh-keygen -l -f /mnt/ssh/ssh-privatekey || echo "Failed to show key fingerprint"
+          apk add --no-cache openssh-client
+          
+          # Create proper SSH directory structure
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          
+          # Copy the SSH key
+          cp /mnt/ssh/ssh-privatekey ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          
+          # Add GitHub to known hosts
+          ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
+          
+          # Display key information for debugging
+          echo "Key information:"
+          ssh-keygen -l -f ~/.ssh/id_ed25519 || echo "Failed to read key"
+          
+          # Create workspace directory
           mkdir -p /workspace
-          GIT_SSH_COMMAND="ssh -vvv -i /mnt/ssh/ssh-privatekey -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" git clone git@github.com:thinkube/devpi-deployment.git /workspace || {
-            echo "===== CLONE FAILED ====="
-            ls -la /mnt/ssh/
-            GIT_SSH_COMMAND="ssh -vvv -o IdentitiesOnly=yes -i /mnt/ssh/ssh-privatekey -o StrictHostKeyChecking=no" git clone git@github.com:thinkube/devpi-deployment.git /workspace || {
-              echo "Clone attempt failed with IdentitiesOnly option too"
+          
+          # Test SSH connection first
+          echo "Testing SSH connection to GitHub..."
+          ssh -v -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no git@github.com || echo "SSH connection test failed"
+          
+          # Try git clone with verbose output
+          echo "Cloning repository: {{inputs.parameters.repo-url}}"
+          git clone -v --verbose {{inputs.parameters.repo-url}} /workspace
+          
+          # Check clone result
+          if [ -d "/workspace/.git" ]; then
+            echo "✅ Repository cloned successfully"
+            ls -la /workspace
+            
+            # Checkout main branch
+            cd /workspace
+            git checkout main
+            
+            # Verify Dockerfile exists
+            if [ -f /workspace/dockerfile/Dockerfile ]; then
+              echo "✓ Dockerfile found at /workspace/dockerfile/Dockerfile"
+            else
+              echo "✗ ERROR: Dockerfile not found at expected location"
+              find /workspace -name Dockerfile
               exit 1
-            }
-          }
-          ls -la /workspace
-          if [ -f /workspace/dockerfile/Dockerfile ]; then
-            echo "✓ Dockerfile found at /workspace/dockerfile/Dockerfile"
+            fi
           else
-            echo "✗ ERROR: Dockerfile not found at expected location"
-            find /workspace -name Dockerfile
+            echo "❌ Clone failed - directory doesn't contain Git repository"
             exit 1
           fi
-      env:
-        - name: GIT_SSH_COMMAND
-          value: "ssh -i /mnt/ssh/ssh-privatekey -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
       volumeMounts:
         - name: workspace
           mountPath: /workspace
@@ -112,15 +248,17 @@ spec:
           
   - name: build-image
     inputs:
+      parameters:
+      - name: image-tag
       artifacts:
         - name: repo
           path: /workspace
     container:
       image: gcr.io/kaniko-project/executor:latest
       args:
-        - --dockerfile=dockerfile/Dockerfile
+        - --dockerfile=/workspace/dockerfile/Dockerfile
         - --context=/workspace
-        - --destination=registry.cmxela.com/thinkube/devpi:20250304T142928
+        - --destination=registry.cmxela.com/thinkube/devpi:{{inputs.parameters.image-tag}}
         - --insecure
         - --insecure-pull
         - --skip-tls-verify
@@ -131,6 +269,11 @@ spec:
         
   - name: update-git
     inputs:
+      parameters:
+      - name: repo-url
+      - name: repo-org
+      - name: repo-name
+      - name: image-tag
       artifacts:
         - name: repo
           path: /workspace
@@ -139,29 +282,61 @@ spec:
       command: ["/bin/sh", "-c"]
       args:
         - |
+          set -e
           echo "Setting up Git configuration..."
           git config --global user.email "ansible@example.com"
           git config --global user.name "Ansible Automation"
-          cd /workspace
-          echo "Listing workspace contents:"
-          ls -la
-          echo "Listing k8s directory contents:"
-          ls -la k8s/ || echo "k8s directory not found"
-          sed -i "s|newTag:.*|newTag: 20250304T142928|" k8s/kustomization.yaml
-          git add k8s/kustomization.yaml
-          git commit -m "Update image tag to 20250304T142928"
-          echo "Setting up SSH for git push"
+          
+          # Set up SSH for git push
+          echo "Setting up SSH for git push..."
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          head -3 /mnt/ssh/ssh-privatekey
+          cp /mnt/ssh/ssh-privatekey ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
+          
+          # Change to workspace directory
+          cd /workspace
+          
+          echo "Workspace contents:"
+          ls -la
+          
+          echo "Checking for k8s directory:"
+          if [ ! -d "k8s" ]; then
+            echo "ERROR: k8s directory not found!"
+            find . -type d | sort
+            exit 1
+          fi
+          
+          echo "k8s directory contents:"
+          ls -la k8s/
+          
+          echo "Checking for kustomization.yaml:"
+          if [ ! -f "k8s/kustomization.yaml" ]; then
+            echo "ERROR: k8s/kustomization.yaml not found!"
+            exit 1
+          fi
+          
+          # Get the image tag from the input parameter
+          IMAGE_TAG="{{inputs.parameters.image-tag}}"
+          echo "Updating image tag to: $IMAGE_TAG"
+          
+          # Updated sed command with better matching
+          sed -i "s|newTag:.*|newTag: $IMAGE_TAG|" k8s/kustomization.yaml
+          
+          echo "Updated kustomization.yaml:"
+          cat k8s/kustomization.yaml
+          
+          echo "Committing changes..."
+          git add k8s/kustomization.yaml
+          git commit -m "Update DevPi image tag to $IMAGE_TAG"
+          
           echo "Testing SSH connection to GitHub:"
-          GIT_SSH_COMMAND="ssh -v -i /mnt/ssh/ssh-privatekey -o StrictHostKeyChecking=no" git ls-remote git@github.com:thinkube/devpi-deployment.git || echo "Failed to connect to GitHub"
+          export GIT_SSH_COMMAND="ssh -v -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no"
+          git ls-remote {{inputs.parameters.repo-url}} || echo "Failed to connect to GitHub"
+          
           echo "Pushing changes to GitHub..."
-          GIT_SSH_COMMAND="ssh -v -i /mnt/ssh/ssh-privatekey -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" git push origin master
-      env:
-        - name: GIT_SSH_COMMAND
-          value: "ssh -i /mnt/ssh/ssh-privatekey -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+          git push origin HEAD:main
       volumeMounts:
         - name: ssh-key
           mountPath: /mnt/ssh

@@ -8,4 +8,4 @@ resources:
 images:
 - name: devpi-image
   newName: registry.cmxela.com/thinkube/devpi
-  newTag: 20250323T151204
+  newTag: 20250329T182604

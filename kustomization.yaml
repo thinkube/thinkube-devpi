@@ -10,4 +10,4 @@ resources:
 images:
 - name: devpi-image
   newName: registry.thinkube.com/thinkube/devpi
-  newTag: 20250531T095302
+  newTag: 20250531T095338

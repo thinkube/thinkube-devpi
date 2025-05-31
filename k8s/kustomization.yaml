@@ -7,5 +7,5 @@ resources:
 
 images:
 - name: devpi-image
-  newName: registry.cmxela.com/thinkube/devpi
+  newName: REGISTRY_PLACEHOLDER/thinkube/devpi
   newTag: 20250409T165825

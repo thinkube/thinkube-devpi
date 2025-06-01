@@ -8,4 +8,4 @@ resources:
 images:
 - name: devpi-image
   newName: REGISTRY_PLACEHOLDER/thinkube/devpi
-  newTag: 20250601T195847
+  newTag: 20250601T200925

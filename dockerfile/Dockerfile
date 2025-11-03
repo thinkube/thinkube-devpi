@@ -1,4 +1,4 @@
-FROM python:3.9-slim
+FROM library/python:3.12-slim
 
 RUN pip install --no-cache-dir devpi-server==6.9.0 devpi-web==4.2.0 devpi-client==6.0.4
 

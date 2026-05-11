@@ -1,6 +1,6 @@
 FROM library/python:3.12-slim
 
-RUN pip install --no-cache-dir devpi-server==6.9.0 devpi-web==4.2.0 devpi-client==6.0.4
+RUN pip install --no-cache-dir devpi-server==6.20.1 devpi-web==5.1.0 devpi-client==7.3.0
 
 RUN mkdir -p /data/devpi
 

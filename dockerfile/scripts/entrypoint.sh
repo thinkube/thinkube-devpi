@@ -36,7 +36,7 @@ if [ ! -z "$DEVPI_OUTSIDE_URL" ]; then
   OUTSIDE_URL_ARGS="--outside-url=$DEVPI_OUTSIDE_URL"
 fi
 
-# For DevPi 6.9.0 we need to use --trusted-proxy instead of --proxy-header
+# For DevPi 6.x we need to use --trusted-proxy instead of --proxy-header
 PROXY_ARGS=""
 if [ ! -z "$DEVPI_TRUSTED_PROXY" ]; then
   echo "Using trusted proxy: $DEVPI_TRUSTED_PROXY"

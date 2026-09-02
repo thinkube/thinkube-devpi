@@ -57,4 +57,6 @@ if [ ! -z "$MEMORY_LIMIT" ]; then
 fi
 
 echo "Starting DevPi server with secret file and proxy settings"
-exec devpi-server --host 0.0.0.0 --port 3141 --secretfile "$SECRET_FILE" $OUTSIDE_URL_ARGS $PROXY_ARGS
+# Further server options the deployment passes through, such as
+# --request-timeout, so a setting does not need a new image.
+exec devpi-server --host 0.0.0.0 --port 3141 --secretfile "$SECRET_FILE" $OUTSIDE_URL_ARGS $PROXY_ARGS $DEVPI_EXTRA_ARGS

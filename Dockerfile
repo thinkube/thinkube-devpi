@@ -1,3 +1,6 @@
+# Copyright Alejandro Martínez Corriá and the Thinkube contributors
+# SPDX-License-Identifier: Apache-2.0
+
 FROM python:3.11-slim
 
 RUN groupadd -g 1000 devpi && \

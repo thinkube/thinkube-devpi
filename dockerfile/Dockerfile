@@ -1,3 +1,6 @@
+# Copyright Alejandro Martínez Corriá and the Thinkube contributors
+# SPDX-License-Identifier: Apache-2.0
+
 FROM library/python:3.12-slim
 
 RUN pip install --no-cache-dir devpi-server==6.20.1 devpi-web==5.1.0 devpi-client==7.3.0

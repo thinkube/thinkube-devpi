@@ -1,18 +1,41 @@
-# DevPi Deployment
+# thinkube-devpi
 
-This repository contains the configuration for deploying DevPi using:
-- Dockerfile for DevPi containerization
-- Argo Workflows with Kaniko for container building
-- ArgoCD for continuous deployment
+The container image for the DevPI server in Thinkube: the private Python
+package index that holds the platform's own packages, such as `tk-llm`, so
+notebooks and apps can install them with pip.
 
-## Components
+## How it reaches a user
 
-- `dockerfile/` - Contains the DevPi Dockerfile
-- `k8s/` - Kubernetes manifests for deployment
-- `workflows/` - Argo Workflow for container building
+This repository is part of [Thinkube](https://github.com/thinkube/thinkube).
+It is not deployed on its own. The Thinkube installer runs the core DevPI
+playbook, `ansible/40_thinkube/core/devpi/10_deploy.yaml` in the thinkube
+repository. That playbook clones this repository, builds
+`dockerfile/Dockerfile` with podman, pushes the image to Harbor and deploys
+it. The Kubernetes manifests come from that playbook, not from this
+repository.
 
-## CI/CD Process
+## What is here
 
-1. Argo Workflow builds the DevPi container image
-2. After successful build, the workflow updates the image tag in the kustomization.yaml
-3. ArgoCD detects the changes to the repository and automatically deploys the updated application
+- `dockerfile/Dockerfile`: Python 3.12 with `devpi-server` 6.20.1,
+  `devpi-web` 5.1.0 and `devpi-client` 7.3.0, data in `/data/devpi`,
+  port 3141.
+- `dockerfile/scripts/entrypoint.sh`: initialises the server directory on
+  first start, creates a persistent secret file, and starts `devpi-server`.
+  It reads these variables, which the deployment sets:
+  - `DEVPISERVER_SERVERDIR`: the data directory.
+  - `DEVPI_OUTSIDE_URL`: the public URL, passed as `--outside-url`.
+  - `DEVPI_TRUSTED_PROXY`: passed as `--trusted-proxy`.
+  - `DEVPI_EXTRA_ARGS`: further `devpi-server` options, such as
+    `--request-timeout`, so a setting does not need a new image.
+
+## Working on it
+
+Build the image from the repository root, as the playbook does:
+
+```bash
+podman build -f dockerfile/Dockerfile -t devpi:dev .
+```
+
+## License
+
+Apache-2.0

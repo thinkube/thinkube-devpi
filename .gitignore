@@ -1,1 +1,4 @@
 devpi-deployment/
+
+# Local Claude Code and Tandem state
+.tandem/
